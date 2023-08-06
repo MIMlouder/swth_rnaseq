@@ -1,5 +1,16 @@
 ## ML PLEASE ADD - how was SNPS.modified generated?
 
+####WEIR FST FROM VCFTOOLS FROM PURE SAMPLES
+
+vcftools --vcf CNH1_biallelic.rem.filtered.recode.vcf
+        --weir-fst-pop samples_inland
+        --weir-fst-pop samples_coastal
+        --keep samples_inland
+        --keep samples_coastal
+        --out ./vcfFST
+
+#FIXED SNPS = > 0.90  -- snps.modified
+
 ## Make masked fasta from fixed SNPs
 module load GCC/9.3.0 BEDTools/2.29.2
 bedtools maskfasta -fi GCF_009819885.1_bCatUst1.pri_genomic.fna -bed SNPS.modified -fo GCF_009819885.1_bCatUst1.pri_genomic.masked.fna
