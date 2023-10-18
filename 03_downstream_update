@@ -1,0 +1,180 @@
+
+######DESeq code below for calling differantial expression within a tissue for pure forms samples -- example below from CNH ####
+library("DESeq2")
+library(edgeR)
+library(tidyverse)
+
+###read in individual count files from STAR alignement and HTCount#####
+sampleFiles <- grep("STAR",list.files(directory),value=TRUE)
+metaData <- read.csv('meta.txt', header = TRUE, sep = "\t")
+metaData1 <- metaData[order(metaData$ID),]
+
+individual <- dplyr::pull(metaData1, Individual)
+conditions <- dplyr::pull(metaData1, Condition)
+Population <- dplyr::pull(metaData1, Population)
+
+sampleTable<-data.frame(sampleName=sampleFiles, fileName=sampleFiles, condition=conditions, population=Population, individual=individual)
+ddsHTSeq<-DESeqDataSetFromHTSeqCount(sampleTable=sampleTable, design=~condition + population + condition:population)
+dds<-DESeq(ddsHTSeq)
+
+matrix(resultsNames(dds))
+
+#####removing genes with low counts#####
+dds <- estimateSizeFactors(dds)
+idx <- rowSums(counts(dds, normalized=TRUE) >= 5 ) >= 4
+dds <- dds[idx,]
+dds <- DESeq(dds)
+
+####DE genes for migratory state#####
+res <- results(dds, list( c("condition_Winter_vs_Spring") ))
+ix = which.min(res$padj) # most significant
+ix
+res <- res[order(res$padj),]
+write.table(res, file='Pure_CNH1_treatment_effect_DeSeq_outpuT.csv', sep=',', quote=FALSE)
+
+####DE genes for subspecies#####
+res = results(dds, list( c("population_Inland_vs_Coastal") ))
+res <- res[order(res$padj),]
+write.table(res, file='Pure_CNH1_population_effect_DeSeq_outpuT.csv', sep=',', quote=FALSE)
+
+####DE genes for GxE#####
+res = results(dds, name="conditionWinter.populationInland")
+res <- res[order(res$padj),]
+write.table(res, file='Pure_CNH1_interaction_effect_DeSeq_outpuT.csv', sep=',', quote=FALSE)
+
+
+
+#######Calling SNPS from pure forms in CNH1 RNAseq data  -- example from an individual sample below #####
+
+#####handling bams from STAR output
+
+## tools
+module load GCC/7.3.0-2.30  OpenMPI/3.1.1 GATK/4.1.0.0-Python-3.6.6
+module load picard/2.21.6-Java-11
+
+####
+ref='/scratch/user/mlouder/ref/GCF_009819885.1_bCatUst1.pri_genomic.fna'
+
+pre='AH19K02-CNH'
+input='$pre/STAR/$pre.Aligned.sortedByCoord.out.bam'
+
+###
+java -jar "$EBROOTPICARD"/picard.jar AddOrReplaceReadGroups TMP_DIR=./tmp I= $input O=$pre.sortrg.bam MAX_RECORDS_IN_RAM=5000000 SORT_ORDER=coordinate RGID=$pre RGLB=test RGPL=ILLUMINA RGPU=test RGSM=$pre CREATE_INDEX=True 2> $pre.addRG.log
+
+java -Xmx7g -jar "$EBROOTPICARD"/picard.jar MarkDuplicates TMP_DIR=`pwd`/tmp INPUT=$pre.sortrg.bam MAX_RECORDS_IN_RAM=5000000 OUTPUT=$pre.duprem.bam M=$pre.duprem.log REMOVE_DUPLICATES=true
+
+gatk SplitNCigarReads -R $ref --tmp-dir ./tmp -I $pre.duprem.bam -O $pre.duprem.split.bam
+
+#####Calling SNPs from duplicate removed bams######
+gatk HaplotypeCaller -I $pre.duprem.split.bam -O $pre.haplo.genes.vcf.gz -L genes.interval_list -R $ref  -stand-call-conf 20 -dont-use-soft-clipped-bases -ERC GVCF
+
+gatk GenotypeGVCFs -R $ref -V $pre.haplo.genes.vcf.gz --max-alternate-alleles 4 --standard-min-confidence-threshold-for-calling 30 -O $pre.genotype_all.vcf.gz -all-sites
+
+
+gatk VariantFiltration --R $ref --V $pre.genotype_all.vcf.gz --window 35 --cluster 3 --filter-name "FS" --filter "FS > 30.0" --filter-name "DP" --filter "DP > 5.0" --filter-name "QD" --filter "QD < 2.0" -O $pre.genotype_all.filtered.vcf
+
+module load GCC/10.2.0 BCFtools/1.11
+bcftools view --max-alleles 2 --exclude-types indels -i 'MIN(FMT/DP)>5' $pre.genotype_all.filtered.vcf > $pre.genotype_all.filtered.biallelic.vcf
+
+vcftools
+        --gzvcf CNH1_biallelic.rem.vcf.gz
+        --recode-INFO-all
+        --max-missing 0.86
+        --out CNH1_biallelic.rem.filtered
+        --recode
+
+####FST calculations########
+vcftools
+        --vcf CNH1_biallelic.rem.filtered.recode.vcf
+        --weir-fst-pop samples_inland
+        --weir-fst-pop samples_coastal
+        --keep samples_inland
+        --keep samples_coastal
+        --out ./vcfFST
+
+
+##########Calling SNPs in hybrids from Star aligned bams -- example below#########
+
+pre='BH19K08-CNH1'
+input='BH19K08-CNH1.Aligned.sortedByCoord.out.bam'
+
+###
+java -jar "$EBROOTPICARD"/picard.jar AddOrReplaceReadGroups TMP_DIR=./tmp I= $input O=$pre.sortrg.bam MAX_RECORDS_IN_RAM=5000000 SORT_ORDER=coordinate RGID=$pre RGLB=test RGPL=ILLUMINA RGPU=test RGSM=$pre CREATE_INDEX=True 2> $pre.addRG.log
+
+java -Xmx7g -jar "$EBROOTPICARD"/picard.jar MarkDuplicates TMP_DIR=`pwd`/tmp INPUT=$pre.sortrg.bam MAX_RECORDS_IN_RAM=5000000 OUTPUT=$pre.duprem.bam M=$pre.duprem.log REMOVE_DUPLICATES=true
+
+
+gatk SplitNCigarReads -R $ref --tmp-dir ./tmp -I $pre.duprem.bam -O $pre.duprem.split.bam
+
+gatk HaplotypeCaller -I $pre.duprem.split.bam -O $pre.haplo.SNP.vcf.gz -L /scratch/user/mlouder/catharus/Hybrid_variants/SNPs.interval_list -R $ref  -stand-call-conf 20 -dont-use-soft-clipped-bases -ERC GVCF
+
+gatk GenotypeGVCFs -R $ref -V $pre.haplo.SNP.vcf.gz --max-alternate-alleles 4 --standard-min-confidence-threshold-for-calling 30 -O $pre.genotype_SNP.vcf.gz -all-sites
+
+
+gatk VariantFiltration --R $ref --V $pre.genotype_SNP.vcf.gz --window 35 --cluster 3 --filter-name "DP" --filter "DP < 5" --filter-name "FS" --filter "FS > 30.0"  --filter-name "QD" --filter "QD < 2.0" -O $pre.genotype_SNP.filtered.vcf
+
+gatk SelectVariants -V $pre.genotype_SNP.filtered.vcf --exclude-filtered -O $pre.genotype_SNP.filtered.PASS.vcf
+
+######ASERreadcounter######
+gatk ASEReadCounter -R $ref -I $pre.duprem.split.bam -V $pre.genotype_SNP.filtered.PASS.vcf -O $pre.SNP.ASE.RNAFixed.ALL.output.table --disable-sequence-dictionary-validation
+
+####Joining ASEReadcount output with gene .bed file for gene names/windows#####
+join -t $'\t' -j2 <(sort -k2 $pre.SNP.ASE.RNAFixed.ALL.output.table) <(sort -k2 /scratch/user/mlouder/catharus/Pure_variants/CNH1/Fixed.CNH1.uniq.geneID.bed) > $pre.SNP.ASE.RNAFixed.ALL.output.genes.table.tsv
+
+
+###Reading in allelic counts summary file per SNP for each hybrid#####
+library(tidyverse)
+p <- read.csv('CNH1.SNPs.txt', sep = "\t", header = TRUE)
+
+###sumarizing by migratory state (Group), sample (id), and gene
+###calc ASE ratio (ref/total counts), and Log Fold Change (LFC = log2(ref/alt))
+###filter for at least 10 counts per individual
+agg_tbl <- p %>% group_by(group,id, gene) %>%
+  summarise(ref=sum(ref),total=sum(total), alt = sum(total) - sum(ref)) %>% filter(total >=10)
+
+###code for alternate and reference counts per individual to get a gene-wide log2fold change (filter for at least 3 samples in each migratory state)
+###Log2fold change between coastal and inland alleles  ####
+LFC_sssp_tbl_comb <- agg_tbl %>% group_by(gene) %>%
+summarise(LFC_avg=log2(mean(ref)/mean(alt)), num_samples=n())  %>%
+arrange(gene) %>% filter(num_samples > 2)
+
+#######DESeq analysis of hybrids versus pure forms for misexpression analysis#######
+library("DESeq2")
+library(edgeR)
+library(tidyverse)
+
+sampleFiles <- grep("STAR",list.files(directory),value=TRUE)
+metaData <- read.csv('meta.txt', header = TRUE, sep = "\t")
+metaData1 <- metaData[order(metaData$ID),]
+
+individual <- dplyr::pull(metaData1, Individual)
+conditions <- dplyr::pull(metaData1, Condition)
+Population <- dplyr::pull(metaData1, Population)
+Batch <- dplyr::pull(metaData1, Batch)
+
+
+sampleTable<-data.frame(sampleName=sampleFiles, fileName=sampleFiles, condition=conditions, population=Population, individual=individual, Batch=Batch)
+ddsHTSeq<-DESeqDataSetFromHTSeqCount(sampleTable=sampleTable, design=~condition + Batch+ Population)
+dds<-DESeq(ddsHTSeq)
+
+matrix(resultsNames(dds))
+
+dds <- estimateSizeFactors(dds)
+idx <- rowSums(counts(dds, normalized=TRUE) >= 5 ) >= 4
+dds <- dds[idx,]
+dds <- DESeq(dds)
+
+#####output for differential expression between hybrids vs inland pure form samples######
+res = results(dds, list( c("population_Hybrid_vs_Inland") ))
+res <- res[order(res$padj),]
+write.table(res, file='Mixed_CNH1_population_effect_DeSeq_outpuT.csv', sep=',', quote=FALSE)
+
+#####output for differential expression between hybrids vs coastal pure form samples######
+res = results(dds, list( c("population_Hybrid_vs_Coastal") ))
+res <- res[order(res$padj),]
+write.table(res, file='Mixed_CNH1_population_effect_misexpress_DeSeq_outpuT.csv', sep=',', quote=FALSE)
+
+###considered misexpressed if padj < 0.1 in both files above####
+
+
+
